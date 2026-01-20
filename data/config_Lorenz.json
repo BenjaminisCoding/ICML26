@@ -1,0 +1,13 @@
+{
+  "sigma": 3,
+  "rho": 20,
+  "beta": 2,
+  "initial_state": [
+    1.0,
+    1.0,
+    0.0
+  ],
+  "t_start": 0,
+  "t_end": 2,
+  "num_points": 100
+}

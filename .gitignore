@@ -1,0 +1,15 @@
+Experiences/
+__pycache__/
+generated_code/
+generated_code/__pycache__
+ex_api_usage.py
+simple_api_call.py
+*.txt
+*.png
+*.pdf
+*.ipynb
+solve/__pycache__/
+data/config_WarfarinTMDD_2 
+data/config_Lorenz
+data/config_RBC
+solve/__pycache__
