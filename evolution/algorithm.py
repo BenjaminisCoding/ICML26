@@ -1,0 +1,212 @@
+
+import random
+import sys
+import copy
+import numpy as np
+
+class EvolutionEngine:
+    def __init__(self, islands, llm_client, data, obs_indices, time_points, n_iterations, mutation_rate = 0.7, crossover_rate = 0.3, temperature_selec_ind = 10 ):
+        """
+        islands: List of Island objects
+        llm_client: LLMClient instance
+        data: Dict containing problem description etc.
+        """
+        self.islands = islands
+        self.llm_client = llm_client
+        self.data = data
+        self.obs_indices = obs_indices
+        self.time_points = time_points
+        self.n_iterations = n_iterations # stopping criterion, if no success observed
+        self.current_iter = 0 # updated if no improvement observed, set to 0 else
+        self.generation = 0
+        self.mutation_rate = mutation_rate # Mutation probability, included here because it is a hyperparameter
+        self.crossover_rate = crossover_rate # Crossover probability
+        self.temperature_selec_ind = temperature_selec_ind # Temperature for selecting individuals, included here because it is a hyperparameter
+        self.current_best_fitness = self.best_fitness() #useful for stopping criterion if no improvement observed
+
+    def best_fitness(self):
+        """
+        Returns the best fitness across all islands.
+        """
+        best_fitness = float('inf')
+        for island in self.islands:
+            best_fitness = min(best_fitness, island.get_best().fitness)
+        return best_fitness
+
+    def select_parents(self, island, k=1):
+        """
+        Selects k parents from an island using Softmax (Boltzmann) selection.
+        Implements two strategies:
+        1. Rejection Sampling: For low k/N ratios. Sample, check duplicate, retry.
+           Fallbacks to Renormalization if retries exceed limit.
+        2. Renormalization Sampling: For high k/N ratios. Mask selected, re-normalize.
+        """
+        population = island.population
+        N = len(population)
+        if N == 0:
+            return []
+        
+        # Calculate weights for all individuals (Assuming finite fitness)
+        fitnesses = np.array([ind.fitness for ind in population])
+        
+        # Stability shift
+        min_fit = np.min(fitnesses)
+        shifted = fitnesses - min_fit
+        weights = np.exp(-shifted / self.temperature_selec_ind)
+        
+        if np.sum(weights) == 0:
+             probs = np.ones(N) / N
+        else:
+             probs = weights / np.sum(weights)
+
+        # Handle k > N case: Must sample with replacement
+        if k > N:
+            indices = np.random.choice(N, size=k, replace=True, p=probs)
+            return [population[i] for i in indices]
+
+        # --- k <= N: Distinct Selection Logic ---
+
+        def get_probs(w):
+            s = np.sum(w)
+            if s == 0: return np.ones(len(w)) / len(w)
+            return w / s
+
+        selected_indices = []
+        
+        # Decide Strategy based on ratio
+        # Threshold 0.5 as requested
+        ratio = k / N
+        use_renormalization = ratio > 0.5
+        
+        # Strategy 1: Rejection Sampling
+        if not use_renormalization:
+            # Reuse probs calculated above
+            current_probs = probs
+            consecutive_fails = 0
+            max_fails = 10
+            
+            while len(selected_indices) < k:
+                idx = np.random.choice(N, p=current_probs)
+                if idx not in selected_indices:
+                    selected_indices.append(idx)
+                    consecutive_fails = 0
+                else:
+                    consecutive_fails += 1
+                
+                # Switch to renormalization if failing too often
+                if consecutive_fails >= max_fails:
+                    use_renormalization = True
+                    break
+        
+        # Strategy 2: Renormalization (Sequential Masking)
+        if use_renormalization:
+            # We need mutatable weights
+            current_weights = weights.copy()
+            # Mask already selected (if switched from strategy 1)
+            for idx in selected_indices:
+                current_weights[idx] = 0.0
+            
+            while len(selected_indices) < k:
+                # Re-normalize on remaining
+                # If all remaining are 0 weight (unlikely unless only bad ones left), Uniform on remaining
+                if np.sum(current_weights) == 0:
+                     # Identify remaining candidates uniformally
+                     remaining = [i for i in range(N) if i not in selected_indices]
+                     if not remaining: break
+                     idx = np.random.choice(remaining)
+                else:
+                     current_probs = get_probs(current_weights)
+                     idx = np.random.choice(N, p=current_probs)
+                
+                # Just in case logic
+                if idx not in selected_indices:
+                    selected_indices.append(idx)
+                    current_weights[idx] = 0.0
+                
+        return [population[i] for i in selected_indices]
+
+    def evolve_island(self, island):
+        """
+        Performs one evolutionary step on a single island.
+        """
+        if len(island.population) == 0:
+            return
+
+        child = None
+        child_code = None
+        fitness = float('inf')
+
+        # Check stopping criterion
+        if self.current_iter < self.n_iterations:
+            # Crossover or Mutation
+            # If we don't have enough for crossover, forced mutation
+            do_crossover = (random.random() < self.crossover_rate) and (len(island.population) >= 2)
+            
+            if do_crossover:
+                parents = self.select_parents(island, k=2)
+                if len(parents) == 2:
+                    p1, p2 = parents[0], parents[1]
+                    child_code = self.llm_client.crossover_model(p1.code, p2.code)
+                    if child_code:
+                        from evolution.models import Individual
+                        child = Individual(child_code)
+                        if child.compile(): 
+                            fitness = child.evaluate(self.data['observed_data'], self.obs_indices, self.time_points)
+                            if fitness < float('inf'):
+                                island.add_individual(child)
+            else:
+                # Mutation
+                parents = self.select_parents(island, k=1)
+                if parents:
+                    parent = parents[0]
+                    instruction = "Optimise the parameters and improve the dynamics to fit the data."
+                    child_code = self.llm_client.evolve_model(parent.code, instruction)
+                    if child_code:
+                        from evolution.models import Individual
+                        child = Individual(child_code)
+                        if child.compile():
+                            fitness = child.evaluate(self.data['observed_data'], self.obs_indices, self.time_points)
+                            if fitness < float('inf'):
+                                island.add_individual(child)
+
+        # check improvement (Global or local?)
+        # User logic used self.current_best_fitness which is global.
+        # If the new child is better than global best -> reset counter
+        
+        # We need to re-verify if child was valid
+        success = (child is not None) and (child.is_compiled)
+        
+        if success and fitness < self.current_best_fitness:
+            self.current_iter = 0
+            self.current_best_fitness = fitness
+            print(f"    Improvement found! New Best: {fitness:.4f}")
+        else:
+            self.current_iter += 1
+
+    def run_generation(self):
+        print(f"--- Generation {self.generation} (Stagnation: {self.current_iter}/{self.n_iterations}) ---")
+        
+        # User requested: "use a random uniform variable to chose an island to evolve"
+        if not self.islands:
+            return []
+            
+        island_idx = random.randint(0, len(self.islands) - 1)
+        target_island = self.islands[island_idx]
+        
+        print(f"Evolving Island {island_idx} (Vars: {target_island.num_vars})...")
+        self.evolve_island(target_island)
+        
+        # Log stats
+        stats = []
+        for i, island in enumerate(self.islands):
+            best = island.get_best()
+            best_fit = best.fitness if best else float('inf')
+            stats.append({
+                'island_idx': i,
+                'num_vars': island.num_vars,
+                'best_fitness': best_fit,
+                'generation': self.generation
+            })
+            
+        self.generation += 1
+        return stats

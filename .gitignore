@@ -1,15 +1,28 @@
-Experiences/
-__pycache__/
-generated_code/
-generated_code/__pycache__
-ex_api_usage.py
-simple_api_call.py
-*.txt
-*.png
-*.pdf
-*.ipynb
-solve/__pycache__/
-data/config_WarfarinTMDD_2 
-data/config_Lorenz
-data/config_RBC
-solve/__pycache__
+# Ignore everything
+*
+
+# Unignore the directory structures
+!evolution/
+!data/
+!solve/
+
+# 3. Re-ignore everything inside those directories 
+# (This ensures only the specific files below are picked up)
+evolution/*
+data/*
+solve/*
+
+# Unignore specific files
+!evolution/*.py
+!optimization_utils.py
+!evolution_visualization.ipynb
+!exploration.ipynb
+!.gitignore
+!data/generated_data.py
+!data/utils.py 
+!solve/method.py
+!solve/utils.py
+!solve/config_optim.json
+!run.py
+!run_noise.py
+!README.md 
