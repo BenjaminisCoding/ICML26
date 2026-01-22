@@ -14,6 +14,7 @@ solve/*
 
 # Unignore specific files
 !evolution/*.py
+!evolution/config.json
 !optimization_utils.py
 !evolution_visualization.ipynb
 !exploration.ipynb
