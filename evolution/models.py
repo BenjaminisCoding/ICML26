@@ -35,7 +35,7 @@ class Individual:
             exec(self.code, globals(), local_scope)
             
             if 'ProposedModel' not in local_scope:
-                raise ValueError("Class 'ProposedModel' not found in code code.")
+                raise ValueError("Class 'ProposedModel' not found in code.")
             
             ModelClass = local_scope['ProposedModel']
             self.model = ModelClass()
@@ -86,6 +86,11 @@ class Individual:
             # 2. Integrate
             X_pred = integrate_euler(self.model, x0, time_points)
             
+            # Check for divergence (NaNs or Infs in trajectory)
+            if torch.isnan(X_pred).any() or torch.isinf(X_pred).any():
+                self.fitness = float('inf')
+                return float('inf')
+            
             # 3. Compute Loss on known indices
             # We need to extract the columns from X_pred that correspond to obs_indices
             valid_obs_indices = [idx for idx in obs_indices if idx < self.model.num_vars]
@@ -102,6 +107,10 @@ class Individual:
                 if obs_idx in valid_obs_indices:
                     mse += torch.mean((X_pred[:, obs_idx] - observed_data[:, i])**2)
             
+            if torch.isnan(mse) or torch.isinf(mse):
+                self.fitness = float('inf')
+                return float('inf')
+                
             self.fitness = mse.item()
             return self.fitness
             
@@ -120,15 +129,18 @@ class Island:
         """
         Adds an individual to the population.
         """
+        # Robustness check
+        if not np.isfinite(individual.fitness):
+            return
+
         self.population.append(individual)
-        # Sort by fitness (lowest is best)
-        self.population.sort(key=lambda ind: ind.fitness)
         
-        # Trim to capacity
+        # Trim to capacity by removing the worst individual (highest fitness)
         if len(self.population) > self.capacity:
-            self.population = self.population[:self.capacity]
+            worst = max(self.population, key=lambda ind: ind.fitness)
+            self.population.remove(worst)
 
     def get_best(self):
         if not self.population:
             return None
-        return self.population[0]
+        return min(self.population, key=lambda ind: ind.fitness)

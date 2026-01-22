@@ -4,8 +4,11 @@ import sys
 import copy
 import numpy as np
 
+import json
+import os
+
 class EvolutionEngine:
-    def __init__(self, islands, llm_client, data, obs_indices, time_points, n_iterations, mutation_rate = 0.7, crossover_rate = 0.3, temperature_selec_ind = 10 ):
+    def __init__(self, islands, llm_client, data, obs_indices, time_points, n_iterations=None):
         """
         islands: List of Island objects
         llm_client: LLMClient instance
@@ -16,12 +19,37 @@ class EvolutionEngine:
         self.data = data
         self.obs_indices = obs_indices
         self.time_points = time_points
-        self.n_iterations = n_iterations # stopping criterion, if no success observed
+        
+        # Load Config
+        try:
+            with open("evolution/config.json", "r") as f:
+                self.config = json.load(f)
+            print("EvolutionEngine loaded evolution/config.json")
+        except FileNotFoundError:
+            print("EvolutionEngine could not find evolution/config.json. Using defaults.")
+            self.config = {}
+
+        evo_strat = self.config.get('evolution_strategy', {})
+        
+        # Hyperparameters from config
+        self.mutation_rate = evo_strat.get('mutation_rate', {}).get('value', 0.7)
+        self.crossover_rate = evo_strat.get('crossover_rate', {}).get('value', 0.3)
+        self.temperature_selec_ind = evo_strat.get('selection_temperature', {}).get('value', 10.0)
+        self.N_parent_crossover = evo_strat.get('N_parent_crossover', {}).get('value', 2)
+        self.max_capacity_island = evo_strat.get('max_capacity_island', {}).get('value', 50)
+        
+        #set max capacity for islands
+        self._set_max_capacity_island()
+        
+        # Stopping criterion
+        if n_iterations is None:
+             self.n_iterations = int(evo_strat.get('n_iterations_stagnation', {}).get('value', 20))
+        else:
+             self.n_iterations = n_iterations
+
         self.current_iter = 0 # updated if no improvement observed, set to 0 else
         self.generation = 0
-        self.mutation_rate = mutation_rate # Mutation probability, included here because it is a hyperparameter
-        self.crossover_rate = crossover_rate # Crossover probability
-        self.temperature_selec_ind = temperature_selec_ind # Temperature for selecting individuals, included here because it is a hyperparameter
+        self.stop_flag = False
         self.current_best_fitness = self.best_fitness() #useful for stopping criterion if no improvement observed
 
     def best_fitness(self):
@@ -30,8 +58,14 @@ class EvolutionEngine:
         """
         best_fitness = float('inf')
         for island in self.islands:
-            best_fitness = min(best_fitness, island.get_best().fitness)
+            candidate = island.get_best()
+            if candidate:
+                 best_fitness = min(best_fitness, candidate.fitness)
         return best_fitness
+
+    def _set_max_capacity_island(self):
+        for island in self.islands:
+            island.capacity = self.max_capacity_island
 
     def select_parents(self, island, k=1):
         """
@@ -140,13 +174,13 @@ class EvolutionEngine:
         if self.current_iter < self.n_iterations:
             # Crossover or Mutation
             # If we don't have enough for crossover, forced mutation
-            do_crossover = (random.random() < self.crossover_rate) and (len(island.population) >= 2)
+            do_crossover = (random.random() < self.crossover_rate) and (len(island.population) >= self.N_parent_crossover)
             
             if do_crossover:
-                parents = self.select_parents(island, k=2)
-                if len(parents) == 2:
-                    p1, p2 = parents[0], parents[1]
-                    child_code = self.llm_client.crossover_model(p1.code, p2.code)
+                parents = self.select_parents(island, k=self.N_parent_crossover)
+                if len(parents) == self.N_parent_crossover:
+                    parent_codes = [p.code for p in parents]
+                    child_code = self.llm_client.crossover_model(parent_codes)
                     if child_code:
                         from evolution.models import Individual
                         child = Individual(child_code)
@@ -159,8 +193,7 @@ class EvolutionEngine:
                 parents = self.select_parents(island, k=1)
                 if parents:
                     parent = parents[0]
-                    instruction = "Optimise the parameters and improve the dynamics to fit the data."
-                    child_code = self.llm_client.evolve_model(parent.code, instruction)
+                    child_code = self.llm_client.evolve_model(parent.code, instruction = None)
                     if child_code:
                         from evolution.models import Individual
                         child = Individual(child_code)
@@ -168,8 +201,13 @@ class EvolutionEngine:
                             fitness = child.evaluate(self.data['observed_data'], self.obs_indices, self.time_points)
                             if fitness < float('inf'):
                                 island.add_individual(child)
+        else:
+             # Stagnation reached, raising flag
+             self.stop_flag = True
+             print("    Stagnation limit reached. Raising stop flag.")
+             return
 
-        # check improvement (Global or local?)
+        # check improvement (Global)
         # User logic used self.current_best_fitness which is global.
         # If the new child is better than global best -> reset counter
         
@@ -190,7 +228,7 @@ class EvolutionEngine:
         if not self.islands:
             return []
             
-        island_idx = random.randint(0, len(self.islands) - 1)
+        island_idx = random.randint(0, len(self.islands) - 1) #uniform random selection of an island
         target_island = self.islands[island_idx]
         
         print(f"Evolving Island {island_idx} (Vars: {target_island.num_vars})...")

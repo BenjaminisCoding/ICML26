@@ -10,24 +10,28 @@ AZURE_ENDPOINT = "https://vdslabazuremloai-ae.openai.azure.com/"
 DEPLOYMENT_NAME = 'gpt-4o-benjamin'
 
 class LLMClient:
-    def __init__(self):
+    def __init__(self, config=None):
+        self.config = config or {}
+        self.deployment_name = DEPLOYMENT_NAME
         self.client = AzureOpenAI(
             api_key=API_KEY,
             api_version=API_VERSION,
             azure_endpoint=AZURE_ENDPOINT
         )
-        self.deployment_name = DEPLOYMENT_NAME
         
         self.system_prompt = """
-You are an expert AI scientist specializing in discovering ordinary differential equations (ODEs) from partial data.
+You are an expert AI scientist specializing in discovering ordinary differential equations (ODEs) from partial data. 
 Your task is to propose the right-hand side of ODE systems to explain observed time-series data.
+You will be given the descritpion of the problem and of the observed variables. 
+You will be ask to generate initial proposals for the ODE system, 
+and will be asked to perform mutation operation or crossover operation on existing models, like in genetic algorithms. 
 
 **Crucial Constraints:**
 1. You will be provided with a **CODE SKELETON**.
 2. You must **NEVER** change the structure of the skeleton.
 3. You must **ONLY** fill in the parts marked with `###`.
 4. Do not change class names, method signatures, or import statements.
-5. The system may have latent (hidden) variables that you need to account for.
+5. As you only observe partial data, the system may have hidden (latent) variables that you need to account for.
 6. Return **ONLY** the python code. No markdown formatting like ```python, no explanations.
 
 **The Skeleton Format:**
@@ -37,6 +41,14 @@ The skeleton defines a `ProposedModel` class. You will need to fill in:
 
 The user might specify the number of variables (dimension) for the system.
 """
+
+    def set_problem_description(self, problem_description):
+        """
+        Appends the specific problem description to the system prompt.
+        This provides context for all subsequent API calls.
+        """
+        self.system_prompt += f"\n\n**Problem Description & Context:**\n{problem_description}\n"
+        print("Problem description added to System Prompt.")
 
     def _get_skeleton(self, num_vars):
         """
@@ -71,15 +83,21 @@ class ProposedModel(nn.Module):
 """
         return skeleton.strip()
 
-    def generate_initial_model(self, problem_description, num_vars):
+    def generate_initial_model(self, num_vars):
         """
         Asks LLM to populate the skeleton for a specific dimension.
         """
         skeleton = self._get_skeleton(num_vars)
         
+        # Get instruction from config or default
+        instruction = self.config.get('llm_instructions', {}).get('initial_generation', {}).get(
+            'value', 
+            "Focus on simple, mechanistic models that could explain the observed dynamics, possibly introducing latent variables if the system seems under-specified."
+        )
+
         user_prompt = f"""
-Problem Description: {problem_description}
 System Dimension: {num_vars} variables.
+Task: {instruction}
 
 Please fill in the following skeleton to propose a candidate ODE system.
 Replace the `###` markers with valid Python code.
@@ -95,7 +113,7 @@ SKELETON:
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=1.0 # High exploration
+                temperature=self.config.get('azure_api', {}).get('temperature_initial', {}).get('value', 1.0)
             )
             return resp.choices[0].message.content.strip()
             
@@ -103,10 +121,16 @@ SKELETON:
             print(f"LLM Error: {e}")
             return None # Handle error upstream
 
-    def evolve_model(self, parent_code, instruction):
+    def evolve_model(self, parent_code, instruction=None):
         """
         Asks LLM to modify an existing model based on instruction (Mutation).
         """
+        if instruction is None:
+            instruction = self.config.get('llm_instructions', {}).get('mutation', {}).get(
+                'value', 
+                "Optimise the parameters and improve the dynamics to fit the data."
+            )
+
         user_prompt = f"""
 Here is an existing ODE model:
 {parent_code}
@@ -121,25 +145,32 @@ Modify the code to satisfy the task. Keep the class structure identical.
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.8
+                temperature=self.config.get('azure_api', {}).get('temperature_mutation', {}).get('value', 0.8)
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
             print(f"LLM Error: {e}")
             return None
 
-    def crossover_model(self, parent1_code, parent2_code, instruction="Combine the best features of both models."):
+    def crossover_model(self, parent_codes_list, instruction=None):
         """
-        Asks LLM to combine two models.
+        Asks LLM to combine multiple models.
         """
+        if instruction is None:
+            instruction = self.config.get('llm_instructions', {}).get('crossover', {}).get(
+                'value', 
+                "Combine the best features of both models."
+            )
+
+        # Build prompt with flexible number of models
+        models_text = ""
+        for i, code in enumerate(parent_codes_list):
+            models_text += f"\n--- Model {i+1} ---\n{code}\n"
+
         user_prompt = f"""
-Here are two ODE models:
+Here are {len(parent_codes_list)} ODE models:
 
---- Model 1 ---
-{parent1_code}
-
---- Model 2 ---
-{parent2_code}
+{models_text}
 
 Task: {instruction}
 Create a new child model that merges their structural ideas. 
@@ -152,7 +183,7 @@ Keep the class structure identical to the skeleton.
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.8
+                temperature=self.config.get('azure_api', {}).get('temperature_crossover', {}).get('value', 0.8)
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
