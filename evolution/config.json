@@ -1,0 +1,108 @@
+{
+    "azure_api": {
+        "temperature_initial": {
+            "value": 1.0,
+            "description": "Temperature for initial model generation. Controls diversity/randomness of valid code.",
+            "range": [
+                0.0,
+                1.5
+            ]
+        },
+        "temperature_mutation": {
+            "value": 0.8,
+            "description": "Temperature for mutation (evolve_model). Lower means more conservative edits.",
+            "range": [
+                0.0,
+                1.5
+            ]
+        },
+        "temperature_crossover": {
+            "value": 0.8,
+            "description": "Temperature for crossover (combining models).",
+            "range": [
+                0.0,
+                1.5
+            ]
+        }
+    },
+    "evolution_strategy": {
+        "max_generations": {
+            "value": 20,
+            "description": "Maximum number of generations to run the evolution.",
+            "range": [
+                1,
+                1000
+            ]
+        },
+        "mutation_rate": {
+            "value": 0.7,
+            "description": "Probability of choosing mutation over crossover when reproducing.",
+            "range": [
+                0.0,
+                1.0
+            ]
+        },
+        "crossover_rate": {
+            "value": 0.3,
+            "description": "Probability of choosing crossover. (Should theoretically sum to 1 with mutation, or be handled as ratio).",
+            "range": [
+                0.0,
+                1.0
+            ]
+        },
+        "selection_temperature": {
+            "value": 10.0,
+            "description": "Temperature (T) for Softmax selection. Higher values = more uniform selection (exploration), Lower values = stricter selection (exploitation).",
+            "range": [
+                0.1,
+                100.0
+            ]
+        },
+        "n_iterations_stagnation": {
+            "value": 20,
+            "description": "Stopping criterion: number of generations without global improvement before stopping.",
+            "range": [
+                5,
+                100
+            ]
+        },
+        "init_population_capacity": {
+            "value": 3,
+            "description": "Initial number of individuals per island.",
+            "range": [
+                1,
+                100
+            ]
+        },
+        "N_parents_crossover": {
+            "value": 2,
+            "description": "Number of parents on which to perform crossover.",
+            "range": [
+                2,
+                100
+            ]
+        },
+        "max_capacity_island": {
+            "value": 50,
+            "description": "Maximum number of individuals on an island.",
+            "range": [
+                5,
+                1000
+            ]
+        }
+    },
+    "llm_instructions": {
+        "initial_generation": {
+            "value": "Propose mechanistic models that could explain the observed dynamics based on the problem description, possibly introducing latent variables if the system seems under-specified.",
+            "description": "Instruction for the initial model generation."
+        },
+        "mutation": {
+            "value": "Perform a mutation operation on these dynamics, ie Change its dynamics to propose a new ODE system",
+            "description": "Instruction for mutation (evolve_model)."
+        },
+        "crossover": {
+            "value": "Perform a crossover operation on the proposals given.",
+            "description": "Instruction for crossover (combining models)."
+        }
+    }
+}
