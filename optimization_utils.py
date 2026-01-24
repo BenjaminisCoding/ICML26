@@ -98,14 +98,15 @@ def integrate_euler(model, x0, t_points):
 def run_homotopy_optimization(model, observed_data, obs_indices, time_points, 
                               tau_schedule=[0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
                               steps_per_tau=1000,
-                              verbose=True):
+                              verbose=True,
+                              system_dim=4):
     """
     Runs PODS Homotopy Optimization.
     Optimizes both parameters AND trajectory X_est.
     Returns: X_est, loss_history, trajectory_history
     """
     dt = time_points[1] - time_points[0]
-    T, D = observed_data.shape[0], 4 # Assuming 4D system
+    T, D = observed_data.shape[0], system_dim
     
     # 1. Initialize Trajectory Estimate (X_est)
     X_init = torch.zeros(T, D)

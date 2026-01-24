@@ -51,6 +51,16 @@ class EvolutionEngine:
         self.generation = 0
         self.stop_flag = False
         self.current_best_fitness = self.best_fitness() #useful for stopping criterion if no improvement observed
+        
+        # Logging
+        self.log_data = []
+
+    def save_logs(self, filepath):
+        """Saves the evolutionary log to a JSON file."""
+        import json
+        with open(filepath, 'w') as f:
+            json.dump(self.log_data, f, indent=2)
+        print(f"Evolution logs saved to {filepath}")
 
     def best_fitness(self):
         """
@@ -83,10 +93,26 @@ class EvolutionEngine:
         # Calculate weights for all individuals (Assuming finite fitness)
         fitnesses = np.array([ind.fitness for ind in population])
         
-        # Stability shift
-        min_fit = np.min(fitnesses)
-        shifted = fitnesses - min_fit
-        weights = np.exp(-shifted / self.temperature_selec_ind)
+        # Stability shift using LOG fitness (handles orders of magnitude differences)
+        # Fitness is MSE, so we use log(fitness) to scale appropriately
+        # If fitness is 0, clip to epsilon
+        safe_fitness = np.maximum(fitnesses, 1e-12)
+        log_fitness = np.log(safe_fitness)
+        
+        min_log_fit = np.min(log_fitness)
+        std_log_fit = np.std(log_fitness)
+        
+        # Adaptive Temperature:
+        # Scale T by the standard deviation of log-fitness.
+        # This ensures that exponents are roughly normalized (z-scores), 
+        # preventing argmax (if spread is huge) or uniform (if spread is tiny).
+        # We assume self.temperature_selec_ind is a scaling factor (default around 1.0).
+        effective_T = self.temperature_selec_ind * (std_log_fit if std_log_fit > 1e-6 else 1.0)
+        
+        shifted = log_fitness - min_log_fit
+        
+        # Use log-fitness for probability: P ~ exp(-log_fitness / T)
+        weights = np.exp(-shifted / effective_T)
         
         if np.sum(weights) == 0:
              probs = np.ones(N) / N
@@ -169,6 +195,10 @@ class EvolutionEngine:
         child = None
         child_code = None
         fitness = float('inf')
+        
+        op_type = "none"
+        parent_ids = []
+        metadata = {}
 
         # Check stopping criterion
         if self.current_iter < self.n_iterations:
@@ -180,10 +210,18 @@ class EvolutionEngine:
                 parents = self.select_parents(island, k=self.N_parent_crossover)
                 if len(parents) == self.N_parent_crossover:
                     parent_codes = [p.code for p in parents]
-                    child_code = self.llm_client.crossover_model(parent_codes)
+                    parent_ids = [p.id for p in parents]
+                    op_type = "crossover"
+                    
+                    # Get instruction from config
+                    instruction = self.config.get('llm_instructions', {}).get('crossover', {}).get('value')
+                    child_code = self.llm_client.crossover_model(parent_codes, instruction)
+                    
                     if child_code:
                         from evolution.models import Individual
-                        child = Individual(child_code)
+                        child = Individual(child_code, parents=parent_ids, creation_op=op_type, generation=self.generation)
+                        child.metadata['instruction'] = instruction
+                        
                         if child.compile(): 
                             fitness = child.evaluate(self.data['observed_data'], self.obs_indices, self.time_points)
                             if fitness < float('inf'):
@@ -193,10 +231,18 @@ class EvolutionEngine:
                 parents = self.select_parents(island, k=1)
                 if parents:
                     parent = parents[0]
-                    child_code = self.llm_client.evolve_model(parent.code, instruction = None)
+                    parent_ids = [parent.id]
+                    op_type = "mutation"
+                    
+                    # Get instruction from config
+                    instruction = self.config.get('llm_instructions', {}).get('mutation', {}).get('value')
+                    child_code = self.llm_client.evolve_model(parent.code, instruction)
+                    
                     if child_code:
                         from evolution.models import Individual
-                        child = Individual(child_code)
+                        child = Individual(child_code, parents=parent_ids, creation_op=op_type, generation=self.generation)
+                        child.metadata['instruction'] = instruction
+                        
                         if child.compile():
                             fitness = child.evaluate(self.data['observed_data'], self.obs_indices, self.time_points)
                             if fitness < float('inf'):
@@ -212,7 +258,22 @@ class EvolutionEngine:
         # If the new child is better than global best -> reset counter
         
         # We need to re-verify if child was valid
-        success = (child is not None) and (child.is_compiled)
+        success = (child is not None) and (child.is_compiled) and (fitness < float('inf'))
+        
+        if success:
+            # LOGGING
+            log_entry = {
+                "event": "reproduction",
+                "generation": self.generation,
+                "op": op_type,
+                "island": island.id,
+                "child_id": child.id,
+                "parent_ids": parent_ids,
+                "fitness": fitness,
+                "code": child_code,
+                "metadata": child.metadata
+            }
+            self.log_data.append(log_entry)
         
         if success and fitness < self.current_best_fitness:
             self.current_iter = 0
@@ -222,6 +283,24 @@ class EvolutionEngine:
             self.current_iter += 1
 
     def run_generation(self):
+        # Log initial population if starting
+        if self.generation == 0 and not self.log_data:
+            print("Logging initial population...")
+            for i, island in enumerate(self.islands):
+                for ind in island.population:
+                    log_entry = {
+                        "event": "reproduction", # Marked as reproduction to fit schema, but op is 'init'
+                        "generation": 0,
+                        "op": "init",
+                        "island": island.id,
+                        "child_id": ind.id,
+                        "parent_ids": [],
+                        "fitness": ind.fitness,
+                        "code": ind.code,
+                        "metadata": ind.metadata if hasattr(ind, 'metadata') else {}
+                    }
+                    self.log_data.append(log_entry)
+
         print(f"--- Generation {self.generation} (Stagnation: {self.current_iter}/{self.n_iterations}) ---")
         
         # User requested: "use a random uniform variable to chose an island to evolve"

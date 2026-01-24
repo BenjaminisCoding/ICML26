@@ -9,7 +9,7 @@
             ]
         },
         "temperature_mutation": {
-            "value": 0.8,
+            "value": 1,
             "description": "Temperature for mutation (evolve_model). Lower means more conservative edits.",
             "range": [
                 0.0,
@@ -17,7 +17,7 @@
             ]
         },
         "temperature_crossover": {
-            "value": 0.8,
+            "value": 1,
             "description": "Temperature for crossover (combining models).",
             "range": [
                 0.0,
@@ -51,19 +51,19 @@
             ]
         },
         "selection_temperature": {
-            "value": 10.0,
-            "description": "Temperature (T) for Softmax selection. Higher values = more uniform selection (exploration), Lower values = stricter selection (exploitation).",
+            "value": 1.0,
+            "description": "Adaptive Scaling Factor for Softmax. effective_T = T * std(log_fitness). T=1.0 implies standard Softmax on Z-scores of log-fitness.",
             "range": [
                 0.1,
                 100.0
             ]
         },
         "n_iterations_stagnation": {
-            "value": 20,
+            "value": 50,
             "description": "Stopping criterion: number of generations without global improvement before stopping.",
             "range": [
                 5,
-                100
+                300
             ]
         },
         "init_population_capacity": {
@@ -92,6 +92,10 @@
         }
     },
     "llm_instructions": {
+        "overall_instructions": {
+            "value": "Using the problem description, reason to find a mechanistic model that could explain the observed dynamics. Do not be afraid to include non-linearities.",
+            "description": "Specific instructions that can be specific to the studied problem."
+        },
         "initial_generation": {
             "value": "Propose mechanistic models that could explain the observed dynamics based on the problem description, possibly introducing latent variables if the system seems under-specified.",
             "description": "Instruction for the initial model generation."

@@ -18,7 +18,7 @@ class LLMClient:
             api_version=API_VERSION,
             azure_endpoint=AZURE_ENDPOINT
         )
-        
+        self.instructions = self.config.get('llm_instructions', '')
         self.system_prompt = """
 You are an expert AI scientist specializing in discovering ordinary differential equations (ODEs) from partial data. 
 Your task is to propose the right-hand side of ODE systems to explain observed time-series data.
@@ -41,6 +41,7 @@ The skeleton defines a `ProposedModel` class. You will need to fill in:
 
 The user might specify the number of variables (dimension) for the system.
 """
+        self.system_prompt += f"\n\n**Further Instructions:**\n{self.instructions}\n"
 
     def set_problem_description(self, problem_description):
         """
@@ -68,9 +69,11 @@ class ProposedModel(nn.Module):
             ###
         }})
         
-    def forward(self, t, state):
-        # state is a list/tensor of size {num_vars}
-        # Unpack state variables if needed (e.g., x1, x2, ...)
+    def forward(self, state):
+        # state is a tensor of size (..., {num_vars})
+        # Unpack state variables using slicing:
+        # x1 = state[..., 0]
+        # x2 = state[..., 1]
         ###
         
         # access params via self.params

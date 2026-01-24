@@ -1,8 +1,11 @@
 
 import torch
+import uuid
 import torch.nn as nn
 import numpy as np
 import traceback
+
+from optimization_utils import run_homotopy_optimization
 
 # Helper for integration (Reuse simple Euler for speed in evolution)
 def integrate_euler(model, x0, t_points):
@@ -11,18 +14,28 @@ def integrate_euler(model, x0, t_points):
     dt = t_points[1] - t_points[0]
     
     for i in range(len(t_points) - 1):
-        dx = model(t_points[i], x) # model.forward(t, x)
+        dx = model(x) # model.forward(x)
         x = x + dx * dt
         trajectory.append(x)
     
     return torch.stack(trajectory)
 
+import uuid
+
 class Individual:
-    def __init__(self, code, model=None):
+    def __init__(self, code, model=None, parents=None, creation_op="init", generation=0):
+        self.id = str(uuid.uuid4())
         self.code = code
         self.model = model
         self.fitness = float('inf')
         self.is_compiled = model is not None
+        self.loss_history = []
+        
+        # Lineage info
+        self.parents = parents if parents else [] # List of parent IDs
+        self.creation_op = creation_op # "init", "mutation", "crossover"
+        self.generation = generation
+        self.metadata = {} # For logging extra info like specific instruction used
 
     def compile(self):
         """
@@ -49,73 +62,50 @@ class Individual:
 
     def evaluate(self, observed_data, obs_indices, time_points):
         """
-        Computes fitness based on integration error (MSE).
-        Does NOT optimize parameters.
+        Computes fitness using Homotopy Optimization.
+        Optimizes parameters and returns the final loss.
         """
         if not self.is_compiled:
             return float('inf')
             
         try:
-            # 1. Construct Initial State
-            # We need a strategy to set x0. 
-            # Strategy: Use observed data for obs indices, 0.5/default for hidden.
-            x0 = torch.zeros(self.model.num_vars)
+            # Filter observed data for dimensions present in the model
+            valid_mask = [i for i, idx in enumerate(obs_indices) if idx < self.model.num_vars]
             
-            # Map observed indices assuming strict ordering for now (Simplification)
-            # In a real scenario, the LLM should tell us the mapping, but for block 2 
-            # we assume the first K variables correspond to the K active obs indices if possible
-            # or we pass explicit mapping.
+            if len(valid_mask) == 0:
+                 return float('inf')
+                 
+            mapped_obs_indices = [obs_indices[i] for i in valid_mask]
+            mapped_observed_data = observed_data[:, valid_mask]
+
+            # Run Homotopy Optimization
+            # Using specific schedule for EA speed
+            fast_schedule = [0.01, 1.0, 100.0] 
+            steps_fast = 200 # 600 total steps vs 6000
             
-            # Better Strategy: Just use the same heuristic as before
-            # If model has 4 vars and we observe 2 vars.
-            # We assume model variables 0 and 2 match observed data 0 and 1? No.
-            # We need the LLM to respect an observable map.
-            # For this Block, let's assume the LLM generates models where 
-            # the FIRST len(obs_indices) variables correspond to the observations.
-            # (Or we fix x0 to a standard guess).
+            X_est, loss_hist, traj_hist = run_homotopy_optimization(
+                self.model, 
+                mapped_observed_data, 
+                mapped_obs_indices, 
+                time_points,
+                tau_schedule=fast_schedule,
+                steps_per_tau=steps_fast,
+                verbose=False,
+                system_dim=self.model.num_vars
+            )
             
-            # Let's try to map strictly by index for now:
-            # valid indices < num_vars get mapped.
-            for i, obs_idx in enumerate(obs_indices):
-                if obs_idx < self.model.num_vars:
-                    x0[obs_idx] = observed_data[0, i] # Taking the i-th column of obs data
+            final_loss = loss_hist[-1]
             
-            # Fill hidden
-            x0[x0 == 0] = 0.1 # avoidance of zero
-            
-            # 2. Integrate
-            X_pred = integrate_euler(self.model, x0, time_points)
-            
-            # Check for divergence (NaNs or Infs in trajectory)
-            if torch.isnan(X_pred).any() or torch.isinf(X_pred).any():
-                self.fitness = float('inf')
-                return float('inf')
-            
-            # 3. Compute Loss on known indices
-            # We need to extract the columns from X_pred that correspond to obs_indices
-            valid_obs_indices = [idx for idx in obs_indices if idx < self.model.num_vars]
-            
-            if len(valid_obs_indices) == 0:
-                 # Model doesn't have enough variables to match observations?
+            if np.isnan(final_loss) or np.isinf(final_loss):
+                 self.fitness = float('inf')
                  return float('inf')
 
-            # We compare X_pred[:, valid_indices] vs observed_data
-            # Note: observed_data shape is (T, len(obs_indices))
-            # We need to match the columns correctly.
-            mse = 0
-            for i, obs_idx in enumerate(obs_indices):
-                if obs_idx in valid_obs_indices:
-                    mse += torch.mean((X_pred[:, obs_idx] - observed_data[:, i])**2)
-            
-            if torch.isnan(mse) or torch.isinf(mse):
-                self.fitness = float('inf')
-                return float('inf')
-                
-            self.fitness = mse.item()
+            self.fitness = final_loss
+            self.loss_history = loss_hist # Store history if needed
             return self.fitness
             
         except Exception as e:
-            print(f"Evaluation Failed: {e}")
+            print(f"Evaluation Failed (Homotopy): {e}")
             self.fitness = float('inf')
             return float('inf')
 
@@ -124,6 +114,7 @@ class Island:
         self.num_vars = num_vars
         self.capacity = capacity
         self.population = []
+        self.id = str(uuid.uuid4())
 
     def add_individual(self, individual):
         """
