@@ -247,7 +247,7 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
     entries = {} # id -> entry
     for entry in log_data:
         if 'child_id' in entry:
-            if island_id is not None and entry.get('island') != island_id:
+            if island_id is not None and entry['island'] != island_id:
                 continue
             entries[entry['child_id']] = entry
 
@@ -259,7 +259,9 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
     op_color_map = {
         'init': 'gray',
         'mutation': 'blue',
-        'crossover': 'red'
+        'crossover': 'red',
+        'migration': 'purple',
+        'extinction': 'black'
     }
     
     for entry in entries.values():
@@ -272,7 +274,7 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
             
         generations.append(gen)
         fitnesses.append(fit)
-        colors.append(op_color_map.get(op, 'black'))
+        colors.append(op_color_map.get(op, 'green')) # Default green/discarded if unknown?
 
     plt.figure(figsize=(12, 8))
     
@@ -309,7 +311,9 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
     legend_elements = [
         Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', label='Init'),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='blue', label='Mutation'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', label='Crossover')
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', label='Crossover'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='purple', label='Migration'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='black', label='Extinction (Reboot)')
     ]
     plt.legend(handles=legend_elements)
     
@@ -319,3 +323,43 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
     plt.yscale("log")
     plt.grid(True, which="both", ls="--", alpha=0.3)
     plt.show()
+
+def get_best_individuals(log_data):
+    """
+    Extracts the best individual (global) and the best individual per island from the log data.
+
+    Args:
+        log_data (list): List of evolution log entries.
+
+    Returns:
+        tuple: (global_best_entry, island_bests_dict)
+               global_best_entry: dict of the single best individual found.
+               island_bests_dict: dict mapping island_id -> best entry for that island.
+    """
+    if not log_data:
+        return None, {}
+
+    global_best = None
+    island_bests = {}
+
+    for entry in log_data:
+        # Check if entry represents a valid individual
+        if 'fitness' not in entry or 'island' not in entry:
+            continue
+            
+        fit = entry['fitness']
+        
+        # Skip failed runs
+        if not isinstance(fit, (int, float)) or fit == float('inf'):
+            continue
+            
+        # Update Global Best
+        if global_best is None or fit < global_best['fitness']:
+            global_best = entry
+            
+        # Update Island Best
+        island_id = entry['island']
+        if island_id not in island_bests or fit < island_bests[island_id]['fitness']:
+            island_bests[island_id] = entry
+            
+    return global_best, island_bests

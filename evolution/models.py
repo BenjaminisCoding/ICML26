@@ -36,6 +36,23 @@ class Individual:
         self.creation_op = creation_op # "init", "mutation", "crossover"
         self.generation = generation
         self.metadata = {} # For logging extra info like specific instruction used
+        self.origin = creation_op # "migration", "extinction", etc. can be passed here or set later
+
+    def __getstate__(self):
+        """
+        Custom pickling state.
+        We cannot pickle dynamically defined model classes/instances safely without dill.
+        So we drop 'model' and force re-compilation on unpickle.
+        """
+        state = self.__dict__.copy()
+        state['model'] = None
+        state['is_compiled'] = False # Will need re-compilation
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # We don't auto-compile here to avoid slow imports during unpickle.
+        # Worker must call compile() explicitly.
 
     def compile(self):
         """
@@ -115,6 +132,9 @@ class Island:
         self.capacity = capacity
         self.population = []
         self.id = str(uuid.uuid4())
+        self.neighbors = [] # List of neighbor Island IDs
+        self.stagnation_counter = 0 # Generations since last best fitness improvement
+        self.last_best_fitness = float('inf')
 
     def add_individual(self, individual):
         """
@@ -127,9 +147,34 @@ class Island:
         self.population.append(individual)
         
         # Trim to capacity by removing the worst individual (highest fitness)
-        if len(self.population) > self.capacity:
+        while len(self.population) > self.capacity:
             worst = max(self.population, key=lambda ind: ind.fitness)
+            if worst.fitness < individual.fitness:
+                 # If the new guy is worse than the worst, actually we should maybe not add him?
+                 # But standard algorithm usually adds children then kills worst.
+                 # If we already added him, and he is the worst, he gets removed.
+                 pass
             self.population.remove(worst)
+            
+    def register_neighbor(self, island_id):
+        if island_id not in self.neighbors and island_id != self.id:
+            self.neighbors.append(island_id)
+            
+    def update_stagnation(self):
+        current_best = self.get_best()
+        if not current_best:
+            return
+            
+        if current_best.fitness < self.last_best_fitness:
+            self.last_best_fitness = current_best.fitness
+            self.stagnation_counter = 0
+        else:
+            self.stagnation_counter += 1
+            
+    def clear_population(self):
+        self.population = []
+        self.stagnation_counter = 0
+        self.last_best_fitness = float('inf')
 
     def get_best(self):
         if not self.population:

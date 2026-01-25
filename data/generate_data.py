@@ -166,6 +166,197 @@ class WarfarinTMDDDataset(Dataset):
         return self.variables
 
 
+class CancerDataset(Dataset):
+    """
+    Dataset class for the Cancer Growth and Resistance model.
+    Models tumor growth, drug effect, and resistance evolution.
+    """
+    def __init__(self, generation_parameters=None):
+        super().__init__(generation_parameters)
+        self.description = """
+        This system models tumor growth under drug treatment, and we observe the concentration of the drug and the tumor size.
+        Note that for this system, we apply a regular treatment D that we will add to your discovered equation on the concentration.
+        To this end, ensure the first equation in your proposal is always the one describing the evolution of the concentration of the drug.
+        """
+        self.variables_description = [
+            "x1: Drug Concentration (C)",
+            "x2: Resistance Level (R)",
+            "x3: Tumor Size (E)"
+        ]
+        
+        # Parameters
+        self.k_el = self.generation_parameters.get('k_el', 0.5)
+        self.alpha = self.generation_parameters.get('alpha', 0.2)
+        self.beta = self.generation_parameters.get('beta', 0.1)
+        self.r_growth = self.generation_parameters.get('r_growth', 0.8)
+        self.K = self.generation_parameters.get('K', 10.0)
+        self.E_max = self.generation_parameters.get('E_max', 1.0)
+        self.EC50 = self.generation_parameters.get('EC50', 0.5)
+        self.D = self.generation_parameters.get('D', 0.5) # Treatment dose Magnitude
+        self.treatment_interval = self.generation_parameters.get('treatment_interval', 2.0) # Cycle length
+        self.treatment_duration = self.generation_parameters.get('treatment_duration', 1.0) # Duration of dose within cycle
+        self.treatment_start_time = self.generation_parameters.get('treatment_start_time', 0.0)
+        
+        self.initial_state = torch.tensor(self.generation_parameters.get('initial_state', [1.0, 0.0, 1.0]), dtype=torch.float32)
+        self.t_start = self.generation_parameters.get('t_start', 0)
+        self.t_end = self.generation_parameters.get('t_end', 50)
+        self.num_points = self.generation_parameters.get('num_points', 200)
+
+    def dynamics(self, t, state):
+        C, R, E = state
+        
+        # Swish
+        # x / (1 + exp(-x)) -> x * sigmoid(x)
+        def swish(x):
+            return x * torch.sigmoid(x)
+            
+        # Pulsed Treatment Logic
+        time_since_start = t - self.treatment_start_time
+        if time_since_start >= 0:
+            cycle_pos = time_since_start % self.treatment_interval
+            if cycle_pos < self.treatment_duration:
+                effective_D = self.D
+            else:
+                effective_D = 0.0
+        else:
+            effective_D = 0.0
+
+        dCdt = -self.k_el * C + effective_D
+        
+        induction = self.alpha * swish(C)
+        decay = self.beta * torch.tanh(R**3)
+        dRdt = induction - decay
+        
+        growth_term = self.r_growth * E * (1 - E / self.K)
+        denominator = self.EC50 + C * (1 + R)
+        killing_rate = (self.E_max * C) / denominator
+        dEdt = growth_term - (killing_rate * E)
+        
+        return torch.stack([dCdt, dRdt, dEdt])
+
+    def generate(self):
+        self.time_points = torch.linspace(self.t_start, self.t_end, self.num_points, dtype=torch.float32)
+        self.variables = odeint(self.dynamics, self.initial_state, self.time_points)
+        return self.variables
+
+
+class AlienDataset(Dataset):
+    """
+    Dataset class for the Alien Binding system.
+    Features a specific non-linear 'crowding' binding interaction: binding ~ C * R * exp(-alpha * C).
+    """
+    def __init__(self, generation_parameters=None):
+        super().__init__(generation_parameters)
+        self.description = "A pharmacodynamic system with a non-linear 'Alien' binding mechanism where binding efficiency decreases with drug crowding (C * R * exp(-alpha * C)). Variables: C (Free Drug), R (Free Receptor), RC (Drug-Receptor Complex)."
+        self.variables_description = [
+            "x1: Free Drug Concentration (C)",
+            "x2: Free Receptor Concentration (R)",
+            "x3: Drug-Receptor Complex (RC)"
+        ]
+        
+        # Parameters
+        self.k_el = self.generation_parameters.get('k_el', 0.1)
+        self.k_syn = self.generation_parameters.get('k_syn', 2.0)
+        self.k_deg = self.generation_parameters.get('k_deg', 0.5)
+        self.k_int = self.generation_parameters.get('k_int', 0.3)
+        self.alpha = self.generation_parameters.get('alpha', 0.2)
+        self.k_bind_base = self.generation_parameters.get('k_bind_base', 1.5)
+        
+        self.initial_state = torch.tensor(self.generation_parameters.get('initial_state', [10.0, 1.0, 0.0]), dtype=torch.float32)
+        self.t_start = self.generation_parameters.get('t_start', 0)
+        self.t_end = self.generation_parameters.get('t_end', 50)
+        self.num_points = self.generation_parameters.get('num_points', 200)
+
+    def dynamics(self, t, state):
+        C, R, RC = state
+        
+        # Alien binding rate
+        binding_flux = self.k_bind_base * C * R * torch.exp(-self.alpha * C)
+        # binding_flux = self.k_bind_base * C * R
+        # Standard dissociation
+        dissociation_flux = 0.1 * RC
+        
+        dCdt = -self.k_el * C - binding_flux + dissociation_flux
+        dRdt = self.k_syn - self.k_deg * R - binding_flux + dissociation_flux
+        dRCdt = binding_flux - dissociation_flux - self.k_int * RC
+        
+        return torch.stack([dCdt, dRdt, dRCdt])
+
+    def generate(self):
+        self.time_points = torch.linspace(self.t_start, self.t_end, self.num_points, dtype=torch.float32)
+        self.variables = odeint(self.dynamics, self.initial_state, self.time_points)
+        return self.variables
+
+
+class PreyPredatorDataset(Dataset):
+    """
+    Dataset for Prey-Predator system with Fear-Driven Infection.
+    Variables: N (Total Prey), I (Infected Prey), P (Predators).
+    """
+    def __init__(self, generation_parameters=None):
+        super().__init__(generation_parameters)
+        #self.description = "Prey-Predator system with disease. Predators eat prey (preferentially infected ones?) and induce fear which increases infection rate. Variables: N (Total Prey), I (Infected Prey), P (Predators)."
+        self.description = "prey-Predator system"
+        self.variables_description = [
+            "x1: Total Prey Population (N)",
+            "x2: Infected Prey Population (I)",
+            "x3: Predator Population (P)"
+        ]
+        
+        # Parameters
+        self.r = self.generation_parameters.get('r', 0.5)      # Prey reproduction
+        self.K = self.generation_parameters.get('K', 100.0)    # Carrying capacity
+        self.a = self.generation_parameters.get('a', 0.02)     # Predation efficiency
+        self.mu = self.generation_parameters.get('mu', 0.05)   # Disease death rate
+        self.beta = self.generation_parameters.get('beta', 0.02) # Infection rate
+        self.alpha = self.generation_parameters.get('alpha', 0.1) # FEAR FACTOR
+        self.e = self.generation_parameters.get('e', 0.5)      # Predator conversion
+        self.d = self.generation_parameters.get('d', 0.1)      # Predator death
+        
+        self.initial_state = torch.tensor(self.generation_parameters.get('initial_state', [100.0, 1.0, 10.0]), dtype=torch.float32)
+        self.t_start = self.generation_parameters.get('t_start', 0)
+        self.t_end = self.generation_parameters.get('t_end', 200)
+        self.num_points = self.generation_parameters.get('num_points', 2000)
+
+    def dynamics(self, t, state):
+        N, I, P = state
+        
+        # Logic check: I cannot exceed N
+        # In ODE integration, we use soft constraints or rely on dynamics.
+        # But if the user code had `if I > N: I = N`, we can mimic that or just let it flow.
+        # Strict clamp inside ODE might be unstable for gradients, but ok for generation.
+        # N = torch.clamp(N, min=1e-6) # Avoid division by zero if N=0
+        
+        S = N - I
+        
+        # dNdt = r*S*(1 - N/K) - (a*N*P) - (mu*I)
+        # Note: Deaths from predation (a*N*P) and disease (mu*I) remove from N.
+        term_birth = self.r * S * (1 - N / self.K)
+        term_predation = self.a * N * P
+        term_disease_death = self.mu * I
+        
+        dNdt = term_birth - term_predation - term_disease_death
+        
+        # dIdt = (beta * S * I * (1 + alpha * P)) - (a * I * P) - (mu * I)
+        # Infection spreads, potentially boosted by fear (alpha*P)
+        term_infection = self.beta * S * I * (1 + self.alpha * P)
+        term_predation_I = self.a * I * P # Predators eat Infected too (assumed proportional or same rate 'a' on 'I'?)
+        # User code: dIdt = ... - (a * I * P) - ...
+        # Wait, if a*N*P is total predation, and I is part of N.
+        # If predation is random, rate on I is a*I*P? Yes.
+        
+        dIdt = term_infection - term_predation_I - term_disease_death
+        
+        # dPdt = (e * a * N * P) - (d * P)
+        dPdt = (self.e * term_predation) - (self.d * P)
+        
+        return torch.stack([dNdt, dIdt, dPdt])
+
+    def generate(self):
+        self.time_points = torch.linspace(self.t_start, self.t_end, self.num_points, dtype=torch.float32)
+        self.variables = odeint(self.dynamics, self.initial_state, self.time_points)
+        return self.variables
+
 # --- Example Usage (for testing and visualization) ---
 if __name__ == '__main__':
     print("--- Testing Lorenz Dataset Generation ---")

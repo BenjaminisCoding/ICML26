@@ -82,7 +82,7 @@ class ProposedModel(nn.Module):
         # Compute derivatives dx/dt
         # Must return stack of {num_vars} derivatives
         ###
-        return torch.stack([###])
+        return torch.stack([###], dim = -1)
 """
         return skeleton.strip()
 

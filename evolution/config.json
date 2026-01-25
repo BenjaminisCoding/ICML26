@@ -23,6 +23,14 @@
                 0.0,
                 1.5
             ]
+        },
+        "max_concurrent_requests": {
+            "value": 5,
+            "description": "Maximum number of concurrent LLM API requests in Parallel Mode.",
+            "range": [
+                1,
+                20
+            ]
         }
     },
     "evolution_strategy": {
@@ -83,11 +91,35 @@
             ]
         },
         "max_capacity_island": {
-            "value": 50,
+            "value": 5,
             "description": "Maximum number of individuals on an island.",
             "range": [
                 5,
                 1000
+            ]
+        },
+        "iter_migration": {
+            "value": 2,
+            "description": "Number of generations between migration events.",
+            "range": [
+                1,
+                100
+            ]
+        },
+        "iter_extinction": {
+            "value": 2,
+            "description": "Multiplier for extinction frequency. Extinction check every iter_migration * iter_extinction generations.",
+            "range": [
+                1,
+                50
+            ]
+        },
+        "n_local_stagnation": {
+            "value": 20,
+            "description": "Number of generations without local improvement before an island is flagged for extinction.",
+            "range": [
+                10,
+                100
             ]
         }
     },
@@ -107,6 +139,38 @@
         "crossover": {
             "value": "Perform a crossover operation on the proposals given.",
             "description": "Instruction for crossover (combining models)."
+        },
+        "extinction_mutation": {
+            "value": "This model is being used to repopulate an island after extinction. Mutate this individual creatively! Do not just change something slightly, propose a big change. Reason about the current problem context to propose a new direction of potential solutions.",
+            "description": "Instruction for high-temperature mutation after extinction."
         }
+    },
+    "analysis": {
+        "features": [
+            "1",
+            "x0",
+            "x1",
+            "x2",
+            "x3",
+            "x0**2",
+            "x1**2",
+            "x2**2",
+            "x3**2",
+            "x0*x1",
+            "x0*x2",
+            "x0*x3",
+            "x1*x2",
+            "x1*x3",
+            "x2*x3",
+            "x0**3",
+            "log(x0)",
+            "exp(x0)",
+            "log(x1)",
+            "exp(x1)",
+            "sin(x0)",
+            "cos(x0)",
+            "tanh(x0)"
+        ],
+        "description": "List of expression components to track in model fingerprints."
     }
 }
