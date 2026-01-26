@@ -1,8 +1,10 @@
 
 import multiprocessing
 import time
+import copy
 import queue
 import traceback
+import random
 from dataclasses import dataclass
 from typing import Any, List, Dict, Optional
 
@@ -62,16 +64,28 @@ class ProxyLLMClient:
         # So we include `response_queue` in the request? No, can't pickle Queue easily in some contexts.
         # Standard Pattern: Manager -> Worker via Pipe.
         
-        # Let's use the provided queues. If `response_queue` is shared, we have a problem.
-        # We will assume `response_queue` is DEDICATED to this worker instance.
-        
-        response = self.response_queue.get()
-        if response.correlation_id != corr_id:
-            # This shouldn't happen if queue is dedicated
-            print(f"CRITICAL WARNING: Received mismatched correlation ID in worker. Got {response.correlation_id}, expected {corr_id}")
-            # If shared queue, we'd need to put it back, but that's messy.
-            # We will ensure unique queues in implementation.
-        
+        start_wait = time.time()
+        while True:
+            try:
+                 # Check if we exceeded total timeout
+                 if time.time() - start_wait > 120:
+                     print(f"CRITICAL: Worker {self.worker_id} timed out waiting for {corr_id}")
+                     return None
+                     
+                 response = self.response_queue.get(timeout=5.0) 
+                 
+                 if response.correlation_id == corr_id:
+                     # Match!
+                     break
+                 else:
+                     # Mismatch - likely a late response from a previous timed-out request.
+                     # Log debug but continue waiting for OUR response.
+                     # print(f"DEBUG: Worker {self.worker_id} skipping late/mismatched ID {response.correlation_id} (wanted {corr_id})")
+                     continue
+            
+            except queue.Empty:
+                 continue
+                 
         if response.error:
             print(f"ProxyLLMClient Error from Manager: {response.error}")
             return None
@@ -85,6 +99,64 @@ class ProxyLLMClient:
 
     def crossover_model(self, parent_codes_list, instruction=None):
         return self._call_proxy('crossover_model', parent_codes_list, instruction=instruction)
+        
+    def batch_evolve_model(self, parent_code_list: List[tuple], instruction=None):
+        """"
+        Batch version of evolve_model.
+        Args:
+            parent_code_list: List of (code, parent_id) tuples or just codes.
+            instruction: Common instruction.
+            
+        Returns:
+            List of result codes (or None if failed).
+            Order might be scrambled? No, we need to map back.
+            Actually, sending corr_ids allows mapping.
+        """
+        import uuid
+        
+        # 1. Send all requests
+        pending_ids = []
+        for code in parent_code_list:
+            if isinstance(code, tuple): code = code[0] # Handle tuple args if passed
+            
+            corr_id = str(uuid.uuid4())
+            req = LLMRequest(method='evolve_model', args=(code,), kwargs={'instruction': instruction}, correlation_id=corr_id)
+            self.request_queue.put((self.worker_id, req))
+            pending_ids.append(corr_id)
+            
+        # 2. Collections
+        results = {}
+        pending_set = set(pending_ids)
+        
+        start_wait = time.time()
+        while pending_set:
+            try:
+                # Timed wait to detect stalls
+                response = self.response_queue.get(timeout=5.0) 
+            except queue.Empty:
+                elapsed = time.time() - start_wait
+                if elapsed > 120: # 2 minutes
+                     print(f"CRITICAL: Worker {self.worker_id} waiting > 120s for Batch LLM. Pending: {len(pending_set)}. Aborting batch.")
+                     break # Exit the wait loop
+                continue
+                
+            if response.correlation_id in pending_set:
+                pending_set.remove(response.correlation_id)
+                results[response.correlation_id] = response.result if not response.error else None
+            else:
+                # Received response for something else?
+                pass
+                
+        # 3. Return in order (Fill missing with None)
+        ordered_res = []
+        for cid in pending_ids:
+            if cid in results:
+                ordered_res.append(results[cid])
+            else:
+                ordered_res.append(None) # Missing/Timed out
+        return ordered_res
+                
+        return ordered_res
     
     # We also need these to satisfy interface, though mostly unused in workers
     def set_problem_description(self, problem_description):
@@ -231,7 +303,7 @@ def worker_evolution(worker_id, islands, request_queue, response_queue, result_q
             break
         
         if cmd == "STEP":
-            engine.log_data = [] # Clear previous logs
+            # engine.log_data is NOT cleared here. It accumulates from Extinction/Injection events.
             
             stats = []
             for island in engine.islands:
@@ -239,23 +311,156 @@ def worker_evolution(worker_id, islands, request_queue, response_queue, result_q
             
             engine.generation += 1
             
-            # Collect Stats
+            # Collect Stats & State for Sync
+            island_states = []
+            
             for i, island in enumerate(engine.islands):
                 best = island.get_best()
                 best_fit = best.fitness if best else float('inf')
+                
+                # Stats for analysis
                 stats.append({
-                    'island_idx': i, # Note: this idx is relative to chunk, probably need global ID? 
-                    # But Main process knows assignment. 
-                    # Actually, we can just send back island.id if needed, but current analysis uses idx.
-                    # Let's send back list of stats.
+                    'island_idx': i, 
                     'num_vars': island.num_vars,
                     'best_fitness': best_fit,
-                    'generation': engine.generation - 1 # Refers to the one just done
+                    'generation': engine.generation - 1
                 })
+                
+                # State for Manager (Sync)
+                state = {
+                    'id': island.id,
+                    'stagnation_counter': island.stagnation_counter,
+                    'best_individual': best # will be pickled (uncompiled)
+                }
+                island_states.append(state)
             
             # Send back results
-            # We send deeply copied data to avoid pickling issues with complex objects if any?
-            # Basic dicts are fine.
-            result_queue.put(("STEP_DONE", engine.log_data, stats))
+            # Result: ("STEP_DONE", logs, stats, island_states)
+            # Use a copy or slice, then clear
+            current_logs = list(engine.log_data)
+            engine.log_data = [] # Clear AFTER capturing
+            result_queue.put(("STEP_DONE", current_logs, stats, island_states))
+            
+        elif isinstance(cmd, tuple):
+             # Complex Commands
+             op = cmd[0]
+             
+             if op == "INJECT_INDIVIDUAL":
+                 # ("INJECT_INDIVIDUAL", island_id, individual)
+                 target_id = cmd[1]
+                 ind = cmd[2]
+                 
+                 # Find island
+                 for island in engine.islands:
+                     if island.id == target_id:
+                         # Ensure ind is compiled if needed? 
+                         # Usually it comes from another worker where it was compiled.
+                         # But unpickling strips model.
+                         ind.compile() 
+                         island.add_individual(ind)
+                         print(f"Worker {worker_id}: Injected individual into {target_id}")
+                         break
+                         
+             elif op == "TRIGGER_EXTINCTION":
+                 # ("TRIGGER_EXTINCTION", island_id, elites_list)
+                 target_id = cmd[1]
+                 elites = cmd[2]
+                 
+                 for island in engine.islands:
+                     if island.id == target_id:
+                         print(f"Worker {worker_id}: Executing Extinction on {target_id}")
+                         
+                         # 1. Clear population
+                         island.clear_population()
+                         
+                         # 2. Repopulate using provided Elites
+                         n_repop = engine.config.get('evolution_strategy', {}).get('max_capacity_island', {}).get('value', 10)
+                         instruction = engine.config.get('llm_instructions', {}).get('extinction_mutation', {}).get('value', "Mutate creatively.")
+                         
+                         # Ensure elites are compiled
+                         clean_elites = []
+                         for e in elites:
+                             if not e.is_compiled: e.compile() # Just in case
+                             if e.is_compiled: clean_elites.append(e)
+                             
+                         if not clean_elites:
+                             print(f"Worker {worker_id}: Warning - No valid elites for extinction. Skipping repopulation.")
+                             continue
+                             
+                         prevent_infinite_loop = 0
+                         needed = n_repop - len(island.population)
+                        
+                         if needed > 0:
+                             print(f"Worker {worker_id}: Batch requesting {needed} individuals...")
+                             # Prepare batch args
+                             parents_selected = [random.choice(clean_elites) for _ in range(needed)]
+                             parent_codes = [p.code for p in parents_selected]
+                             
+                             # Batch Call
+                             child_codes = engine.llm_client.batch_evolve_model(parent_codes, instruction)
+                             
+                             # Process results
+                             for i, c_code in enumerate(child_codes):
+                                 if c_code:
+                                     pid = parents_selected[i].id
+                                     from evolution.models import Individual
+                                     child = Individual(c_code, parents=[pid], creation_op="extinction", generation=engine.generation)
+                                     child.metadata['instruction'] = instruction
+                                     child.metadata['extinction_event'] = True
+                                     
+                                     if child.compile():
+                                         f = child.evaluate(engine.data['observed_data'], engine.obs_indices, engine.time_points)
+                                         if f < float('inf'):
+                                             child.metadata['fingerprint'] = engine.encoder.encode(child)
+                                             island.add_individual(child)
+                                             
+                                             # LOGGING
+                                             log_entry = {
+                                                 "event": "reproduction",
+                                                 "generation": engine.generation,
+                                                 "op": "extinction",
+                                                 "island": island.id,
+                                                 "child_id": child.id,
+                                                 "parent_ids": [pid],
+                                                 "fitness": f,
+                                                 "code": c_code,
+                                                 "metadata": child.metadata
+                                             }
+                                             engine.log_data.append(log_entry)
+                        
+                         # Cleanup (Serial fill if needed)
+                         while len(island.population) < n_repop and prevent_infinite_loop < 20:
+                             parent = random.choice(clean_elites)
+                             child_code = engine.llm_client.evolve_model(parent.code, instruction)
+                             # ... serial logic ...
+                             if child_code:
+                                  from evolution.models import Individual
+                                  child = Individual(child_code, parents=[parent.id], creation_op="extinction", generation=engine.generation)
+                                  child.metadata['instruction'] = instruction
+                                  child.metadata['extinction_event'] = True
+                                  if child.compile():
+                                      f = child.evaluate(engine.data['observed_data'], engine.obs_indices, engine.time_points)
+                                      if f < float('inf'):
+                                          child.metadata['fingerprint'] = engine.encoder.encode(child)
+                                          island.add_individual(child)
+
+                                          # LOGGING
+                                          log_entry = {
+                                              "event": "reproduction",
+                                              "generation": engine.generation,
+                                              "op": "extinction",
+                                              "island": island.id,
+                                              "child_id": child.id,
+                                              "parent_ids": [parent.id],
+                                              "fitness": f,
+                                              "code": child_code,
+                                              "metadata": child.metadata
+                                          }
+                                          engine.log_data.append(log_entry)
+                             prevent_infinite_loop += 1
+                             
+                         island.stagnation_counter = 0 # Verify reset
+                         print(f"Worker {worker_id}: Extinction complete. Pop size: {len(island.population)}")
+                         break
     
     print(f"Worker {worker_id} stopping.")

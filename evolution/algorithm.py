@@ -1,8 +1,11 @@
 
 import random
 import sys
+import uuid
 import copy
 import numpy as np
+import multiprocessing
+import traceback
 
 import json
 import os
@@ -44,7 +47,6 @@ class EvolutionEngine:
         self._set_max_capacity_island()
         
         self.iter_migration = int(evo_strat.get('iter_migration', {}).get('value', 5))
-        self.iter_extinction = int(evo_strat.get('iter_extinction', {}).get('value', 5))
         self.n_local_stagnation = int(evo_strat.get('n_local_stagnation', {}).get('value', 20))
 
         # Stopping criterion
@@ -68,6 +70,7 @@ class EvolutionEngine:
         self.response_queues = {}
         self.result_queues = {} # [NEW] For worker -> main communication
         self.command_queues = []
+        self.island_to_worker = {} # [NEW] Map island_id -> worker_index (for command routing)
         self.stop_event = None
         self.parallel_started = False
 
@@ -75,6 +78,37 @@ class EvolutionEngine:
         from evolution.encoding import ExpressionEncoder
         features = self.config.get('analysis', {}).get('features', [])
         self.encoder = ExpressionEncoder(features)
+
+        # Auto-save configuration
+        # Only the MainProcess should manage log files and Run IDs
+        import time
+        import multiprocessing
+        
+        self.run_id = None
+        self.history_dir = "history"
+        self.autosave_path = None
+        self.unique_log_path = None
+        
+        if multiprocessing.current_process().name == "MainProcess":
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            self.run_id = f"run_{timestamp}_{uuid.uuid4().hex[:4]}"
+            
+            os.makedirs(self.history_dir, exist_ok=True)
+            
+            # Paths
+            self.autosave_path = os.path.join(self.history_dir, "autosave_latest.json")
+            self.autosave_config_path = os.path.join(self.history_dir, "autosave_config.json")
+            
+            self.unique_log_path = os.path.join(self.history_dir, f"{self.run_id}_logs.json")
+            self.unique_config_path = os.path.join(self.history_dir, f"{self.run_id}_config.json")
+            
+            # Save initial config to both locations
+            self.save_config(self.autosave_config_path)
+            self.save_config(self.unique_config_path)
+            
+            print(f"Evolution Run ID: {self.run_id}")
+            print(f"Logs will be saved to: {self.unique_log_path}")
+
 
         self._log_initial_islands() # Log initial population
         self._setup_neighbors()
@@ -124,7 +158,7 @@ class EvolutionEngine:
             if not best: continue
             
             for neighbor_id in island.neighbors:
-                if neighbor_id in island_map:
+                if neighbor_id in island_map and neighbor_id != island.id:
                     # Clone best
                     clone = copy.deepcopy(best)
                     clone.id = str(uuid.uuid4()) # Unique ID
@@ -133,11 +167,18 @@ class EvolutionEngine:
                     clone.metadata['migration_source'] = island.id
                     migrations.append((neighbor_id, clone))
                     
-        for tid, ind in migrations:
-            target = island_map[tid]
-            target.add_individual(ind)
-            # Log
-            log_entry = {
+        # Apply Migrations
+        if self.n_cores > 1:
+            # Parallel: Send INJECT commands
+            for tid, ind in migrations:
+                # Find worker for target island
+                wid_idx = self.island_to_worker.get(tid)
+                if wid_idx is not None:
+                    # Send command ("INJECT_INDIVIDUAL", island_id, individual)
+                    self.command_queues[wid_idx].put(("INJECT_INDIVIDUAL", tid, ind))
+                    
+                    # Log event locally since Main tracks logs
+                    log_entry = {
                         "event": "migration",
                         "generation": self.generation,
                         "op": "migration",
@@ -147,8 +188,26 @@ class EvolutionEngine:
                         "fitness": ind.fitness,
                         "code": ind.code,
                         "metadata": ind.metadata
-            }
-            self.log_data.append(log_entry)
+                    }
+                    self.log_data.append(log_entry)
+        else:
+            # Serial: Apply directly
+            for tid, ind in migrations:
+                target = island_map[tid]
+                target.add_individual(ind)
+                # Log
+                log_entry = {
+                        "event": "migration",
+                        "generation": self.generation,
+                        "op": "migration",
+                        "island": tid,
+                        "child_id": ind.id,
+                        "parent_ids": ind.parents,
+                        "fitness": ind.fitness,
+                        "code": ind.code,
+                        "metadata": ind.metadata
+                }
+                self.log_data.append(log_entry)
 
     def perform_extinction(self):
         """
@@ -190,34 +249,49 @@ class EvolutionEngine:
 
                 # 2. SAFE TO KILL. We have a backup plan.
                 print(f"Extinction Triggered for Island {island.id} (Stagnation: {island.stagnation_counter}). Rebooting population...")
-                island.clear_population()
                 
-                # 3. Repopulate
-                n_repop = self.config.get('evolution_strategy', {}).get('max_capacity_island', {}).get('value', 10)
-                instruction = self.config.get('llm_instructions', {}).get('extinction_mutation', {}).get('value', "Mutate creatively.")
-                
-                prevent_infinite_loop = 0
-                while len(island.population) < n_repop and prevent_infinite_loop < 100:
-                    parent = random.choice(elites)
-                    # Call LLM
-                    child_code = self.llm_client.evolve_model(parent.code, instruction)
-                    if child_code:
-                         from evolution.models import Individual
-                         child = Individual(child_code, parents=[parent.id], creation_op="extinction", generation=self.generation)
-                         child.metadata['instruction'] = instruction
-                         child.metadata['extinction_event'] = True
-                         
-                         if child.compile():
-                             f = child.evaluate(self.data['observed_data'], self.obs_indices, self.time_points)
-                             if f < float('inf'):
-                                 child.metadata['fingerprint'] = self.encoder.encode(child)
-                                 island.add_individual(child)
-                    prevent_infinite_loop += 1
-                if prevent_infinite_loop >= 100:
-                    print(f"Infinite loop detected for island {island.id} when performing extinction mutation.")
-                
-                # Reset counter is done in clear_population, already done.
-                island.stagnation_counter = 0
+                if self.n_cores > 1:
+                    # Parallel: Send TRIGGER_EXTINCTION with Elites Payload
+                    wid_idx = self.island_to_worker.get(island.id)
+                    if wid_idx is not None:
+                        # Payload: List of Elite Individuals
+                        # We send copies to avoid modification issues
+                        payload_elites = [copy.deepcopy(e) for e in elites]
+                        self.command_queues[wid_idx].put(("TRIGGER_EXTINCTION", island.id, payload_elites))
+                        
+                        # We should verify reset locally? 
+                        # Update local state immediately to avoid re-triggering next step before sync
+                        island.stagnation_counter = 0 
+                else:
+                    # Serial: Execute Locally
+                    island.clear_population()
+                    
+                    # 3. Repopulate
+                    n_repop = self.config.get('evolution_strategy', {}).get('max_capacity_island', {}).get('value', 10)
+                    instruction = self.config.get('llm_instructions', {}).get('extinction_mutation', {}).get('value', "Mutate creatively.")
+                    
+                    prevent_infinite_loop = 0
+                    while len(island.population) < n_repop and prevent_infinite_loop < 100:
+                        parent = random.choice(elites)
+                        # Call LLM
+                        child_code = self.llm_client.evolve_model(parent.code, instruction)
+                        if child_code:
+                             from evolution.models import Individual
+                             child = Individual(child_code, parents=[parent.id], creation_op="extinction", generation=self.generation)
+                             child.metadata['instruction'] = instruction
+                             child.metadata['extinction_event'] = True
+                             
+                             if child.compile():
+                                 f = child.evaluate(self.data['observed_data'], self.obs_indices, self.time_points)
+                                 if f < float('inf'):
+                                     child.metadata['fingerprint'] = self.encoder.encode(child)
+                                     island.add_individual(child)
+                        prevent_infinite_loop += 1
+                    if prevent_infinite_loop >= 100:
+                        print(f"Infinite loop detected for island {island.id} when performing extinction mutation.")
+                    
+                    # Reset counter is done in clear_population, already done.
+                    island.stagnation_counter = 0
 
     def save_logs(self, filepath):
         """Saves the evolutionary log to a JSON file."""
@@ -226,6 +300,16 @@ class EvolutionEngine:
             json.dump(self.log_data, f, indent=2)
         print(f"Evolution logs saved to {filepath}")
 
+    def save_config(self, filepath):
+        """Saves the current configuration to a JSON file."""
+        import json
+        try:
+            with open(filepath, 'w') as f:
+                json.dump(self.config, f, indent=2)
+            print(f"Configuration saved to {filepath}")
+        except Exception as e:
+            print(f"Failed to save config to {filepath}: {e}")
+            
     def best_fitness(self):
         """
         Returns the best fitness across all islands.
@@ -375,6 +459,9 @@ class EvolutionEngine:
         Performs one evolutionary step on a single island.
         """
         if len(island.population) == 0:
+            # Force stagnation increment to trigger extinction (Reboot) on dead islands.
+            # This allows recovery if repopulation failed previously due to API errors.
+            island.stagnation_counter += 1
             return
 
         child = None
@@ -469,6 +556,9 @@ class EvolutionEngine:
         else:
             self.current_iter += 1
 
+        # Check local island stagnation
+        island.update_stagnation()
+
     def start_parallel_workers(self):
         if self.parallel_started:
             return
@@ -502,8 +592,12 @@ class EvolutionEngine:
         # 2. Split Islands, assign to workers
         # Simple Round Robin distribution
         island_chunks = [[] for _ in range(self.n_cores)]
+        self.island_to_worker = {} # Reset map
+        
         for i, island in enumerate(self.islands):
-            island_chunks[i % self.n_cores].append(island)
+            worker_idx = i % self.n_cores
+            island_chunks[worker_idx].append(island)
+            self.island_to_worker[island.id] = worker_idx
 
         # 3. Start Workers
         self.command_queues = []
@@ -629,9 +723,42 @@ class EvolutionEngine:
             for wid, q in self.result_queues.items():
                 while True:
                     msg = q.get()
-                    # Check for Tuple ("STEP_DONE", logs, worker_stats)
+                    # Check for Tuple ("STEP_DONE", logs, worker_stats, island_states)
                     if isinstance(msg, tuple) and msg[0] == "STEP_DONE":
-                        _, w_logs, w_stats = msg
+                        # Updated unpack
+                        if len(msg) == 4:
+                            _, w_logs, w_stats, w_states = msg
+                            
+                            # Sync State
+                            # Update local proxies
+                            # w_states is list of {id, stagnation, best_ind}
+                            for state in w_states:
+                                isl_id = state['id']
+                                # Find local island
+                                # Use dict for speed if needed, but list is short
+                                for loc_isl in self.islands:
+                                    if loc_isl.id == isl_id:
+                                        loc_isl.stagnation_counter = state['stagnation_counter']
+                                        # Update best? 
+                                        # Since we don't have full population, we can't fully sync.
+                                        # But we can inject the best individual into our local proxy 
+                                        # so that 'get_best()' returns it?
+                                        # Or just rely on w_stats for best fitness?
+                                        # Migration logic calls 'island.get_best()'.
+                                        # So YES, we must insert the best individual.
+                                        best_ind = state['best_individual']
+                                        if best_ind:
+                                            # Add to population? Or just set as best?
+                                            # If we add, population grows indefinitely in Main.
+                                            # We should probably clear Main population and set only Best?
+                                            # For Proxy purposes, keeping 1 (Best) is enough.
+                                            loc_isl.population = [best_ind] 
+                                        break
+                                        
+                        else:
+                            # Backward compat / Fallback
+                            _, w_logs, w_stats = msg
+                        
                         self.log_data.extend(w_logs)
                         stats.extend(w_stats)
                         break
@@ -683,6 +810,18 @@ class EvolutionEngine:
         # Let's assume workers send back (step_log_entries, step_best_fitness).
         # We need to update `worker_evolution` in `parallel.py` to send this.
         # And `run_generation` here needs to unpack it.
+        # Autosave logs to prevent data loss on crash
+        if self.autosave_path:
+            # Save to 'latest'
+            self.save_logs(self.autosave_path)
+            # Save to unique history file
+            self.save_logs(self.unique_log_path)
+            
+            # Also ensure config is up to date (in case of dynamic changes, though rare)
+            if hasattr(self, 'autosave_config_path'):
+                 self.save_config(self.autosave_config_path)
+                 self.save_config(self.unique_config_path)
+            
         pass # Placeholder comment, proceeding with simple implementation for now.
         self.generation += 1 
         # Log stats
@@ -698,3 +837,90 @@ class EvolutionEngine:
             })
             
         return stats
+
+def _init_island_worker(args):
+    """
+    Worker function for parallel island initialization.
+    Args:
+        args (tuple): (island_config, n_pop, config, data, obs_indices, time_points, problem_description)
+    """
+    try:
+        island_idx, island_config, n_pop, config, data, obs_indices, time_points, problem_description = args
+        num_vars = island_config['num_vars']
+        
+        # Imports inside worker to ensure clean state if needed, though top-level imports work too
+        from evolution.models import Island, Individual
+        from evolution.llm_interface import LLMClient
+        
+        # Instantiate LLM Client (local to this process)
+        llm = LLMClient(config)
+        if problem_description:
+            llm.set_problem_description(problem_description)
+            
+        island = Island(num_vars=num_vars, capacity=n_pop)
+        attempts = 0
+        max_attempts = n_pop * 5 # Generous retry limit
+        
+        print(f"Worker for Island {island_idx} (Dim {num_vars}) started.")
+        
+        while len(island.population) < n_pop and attempts < max_attempts:
+            attempts += 1
+            try:
+                code = llm.generate_initial_model(island.num_vars)
+                if code:
+                    ind = Individual(code, creation_op="init", generation=0)
+                    if ind.compile():
+                        fit = ind.evaluate(data, obs_indices, time_points)
+                        if fit < float('inf'):
+                            # ind.model = None # Ensure it's stripped before return (handled by __getstate__ anyway)
+                            island.add_individual(ind)
+            except Exception as e:
+                # print(f"Error in worker {island_idx}: {e}")
+                pass
+                
+        print(f"Worker for Island {island_idx} finished. Pop: {len(island.population)}")
+        return island
+        
+    except Exception as e:
+        print(f"CRITICAL WORKER FAIL: {e}")
+        traceback.print_exc()
+        return None
+
+def parallel_create_islands(n_pop, island_structure, config, data, obs_indices, time_points, problem_description, n_cores=4):
+    """
+    Parallel version of create_initial_islands.
+    
+    Args:
+        n_pop (int): Population size per island.
+        island_structure (list): List of dicts, e.g. [{'num_vars': 2}, {'num_vars': 3}]
+        config (dict): Configuration dictionary.
+        data (tensor): Observed data.
+        obs_indices (list): Observed indices.
+        time_points (tensor): Time points.
+        problem_description (str): Text description for LLM.
+        n_cores (int): Number of parallel workers.
+        
+    Returns:
+        list[Island]: Fully populated Island objects.
+    """
+    print(f"Initializing {len(island_structure)} islands using {n_cores} cores...")
+    
+    tasks = []
+    for i, isl_conf in enumerate(island_structure):
+        # Prepare args
+        # Note: We pass copies of data/config. Multiprocessing handles serialization.
+        task_args = (i, isl_conf, n_pop, config, data, obs_indices, time_points, problem_description)
+        tasks.append(task_args)
+        
+    results = []
+    with multiprocessing.Pool(processes=n_cores) as pool:
+        # chunksize=1 is fine as tasks are heavy
+        results = pool.map(_init_island_worker, tasks)
+        
+    # Filter out failures
+    islands = [res for res in results if res is not None]
+    
+    if len(islands) < len(island_structure):
+        print(f"WARNING: Only {len(islands)}/{len(island_structure)} islands successfully initialized.")
+        
+    return islands

@@ -99,7 +99,8 @@ def run_homotopy_optimization(model, observed_data, obs_indices, time_points,
                               tau_schedule=[0.001, 0.01, 0.1, 1.0, 10.0, 100.0],
                               steps_per_tau=1000,
                               verbose=True,
-                              system_dim=4):
+                              system_dim=4,
+                              optimize_params=True): # New Argument
     """
     Runs PODS Homotopy Optimization.
     Optimizes both parameters AND trajectory X_est.
@@ -123,10 +124,15 @@ def run_homotopy_optimization(model, observed_data, obs_indices, time_points,
     X_est = nn.Parameter(X_init.clone())
     
     # Optimizer
-    optimizer = optim.Adam([ 
-        {'params': [X_est], 'lr': 0.05},
-        {'params': model.parameters(), 'lr': 0.001}
-    ], lr=0.01)
+    param_groups = [{'params': [X_est], 'lr': 0.05}]
+    
+    if optimize_params:
+        param_groups.append({'params': model.parameters(), 'lr': 0.001})
+        if verbose: print("Optimization Mode: Trajectory + Parameters")
+    else:
+        if verbose: print("Optimization Mode: Trajectory ONLY (Fixed Params)")
+    
+    optimizer = optim.Adam(param_groups, lr=0.01)
     
     loss_history = []
     trajectory_history = {} # Key: tau, Value: snapshot of X_est

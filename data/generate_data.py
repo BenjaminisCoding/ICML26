@@ -296,7 +296,10 @@ class PreyPredatorDataset(Dataset):
     def __init__(self, generation_parameters=None):
         super().__init__(generation_parameters)
         #self.description = "Prey-Predator system with disease. Predators eat prey (preferentially infected ones?) and induce fear which increases infection rate. Variables: N (Total Prey), I (Infected Prey), P (Predators)."
-        self.description = "prey-Predator system"
+        # self.description = "prey-Predator system"
+        self.dexription = """ 
+            You are observing a population of prey and the predators that eat them. The environment can affect the dynamics of their populations.
+        """
         self.variables_description = [
             "x1: Total Prey Population (N)",
             "x2: Infected Prey Population (I)",

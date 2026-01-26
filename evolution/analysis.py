@@ -363,3 +363,15 @@ def get_best_individuals(log_data):
             island_bests[island_id] = entry
             
     return global_best, island_bests
+
+def get_best_child(logs, islands):
+    '''
+    Get the best child in object format from the logs.
+    '''
+    best_child_entry = get_best_individuals(logs)[0]
+    best_child_id = best_child_entry['child_id']
+    for island in islands:
+        for child in island:
+            if child.id == best_child_id:
+                return child
+    return None
