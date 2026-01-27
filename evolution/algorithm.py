@@ -777,6 +777,19 @@ class EvolutionEngine:
                 print(f"    Global Improvement! New Best: {current_best:.4f}")
             else:
                 self.current_iter += 1
+            
+            # Autosave logs (Parallel Path)
+            if self.autosave_path:
+                self.save_logs(self.autosave_path)
+                if self.unique_log_path:
+                    self.save_logs(self.unique_log_path)
+                
+                # Also ensure config is up to date
+                if hasattr(self, 'autosave_config_path'):
+                     self.save_config(self.autosave_config_path)
+                     if hasattr(self, 'unique_config_path') and self.unique_config_path:
+                         self.save_config(self.unique_config_path)
+
             self.generation += 1 
             return stats
         
@@ -811,16 +824,19 @@ class EvolutionEngine:
         # We need to update `worker_evolution` in `parallel.py` to send this.
         # And `run_generation` here needs to unpack it.
         # Autosave logs to prevent data loss on crash
+        # Autosave logs to prevent data loss on crash
         if self.autosave_path:
             # Save to 'latest'
             self.save_logs(self.autosave_path)
             # Save to unique history file
-            self.save_logs(self.unique_log_path)
+            if self.unique_log_path:
+                self.save_logs(self.unique_log_path)
             
             # Also ensure config is up to date (in case of dynamic changes, though rare)
             if hasattr(self, 'autosave_config_path'):
                  self.save_config(self.autosave_config_path)
-                 self.save_config(self.unique_config_path)
+                 if hasattr(self, 'unique_config_path') and self.unique_config_path:
+                    self.save_config(self.unique_config_path)
             
         pass # Placeholder comment, proceeding with simple implementation for now.
         self.generation += 1 

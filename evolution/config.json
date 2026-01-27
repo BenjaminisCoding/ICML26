@@ -133,15 +133,15 @@
             "description": "Instruction for the initial model generation."
         },
         "mutation": {
-            "value": "Perform a mutation operation on these dynamics, ie Change its dynamics to propose a new ODE system",
+            "value": "Perform a mutation operation on these dynamics, ie Change its dynamics to propose a new ODE system. Keep the same number of variables.",
             "description": "Instruction for mutation (evolve_model)."
         },
         "crossover": {
-            "value": "Perform a crossover operation on the proposals given.",
+            "value": "Perform a crossover operation on the proposals given. Keep the same number of variables.",
             "description": "Instruction for crossover (combining models)."
         },
         "extinction_mutation": {
-            "value": "You are repopulating an island after extinction and are provided with an individual that performed the best in other islands. Mutate this individual creatively! Do not just change something slightly, propose a big change. Reason about the current problem context to propose a new direction of potential solutions.",
+            "value": "You are repopulating an island after extinction and are provided with an individual that performed the best in other islands. Mutate this individual creatively! Do not just change something slightly, propose a big change. Reason about the current problem context to propose a new direction of potential solutions. Do not change the number of variables in the system",
             "description": "Instruction for high-temperature mutation after extinction."
         }
     },

@@ -233,7 +233,7 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
     Plots a 2D graph of the evolution:
     X-axis: Generation
     Y-axis: Fitness (Log Scale)
-    island_id: If specified, only shows individuals from that island.
+    island_id: If specified, only shows individuals from that island (or list of islands).
 
     Nodes are individuals. Edges connect parents to children.
     """
@@ -241,13 +241,21 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
         print("No log data to plot.")
         return
 
+    # Normalize island_id to list
+    target_islands = None
+    if island_id is not None:
+        if isinstance(island_id, list):
+            target_islands = set(island_id)
+        else:
+            target_islands = {island_id}
+
     # Filter valid reproduction events
     # We need a quick lookup for (gen, fitness) of every individual to draw lines
     
     entries = {} # id -> entry
     for entry in log_data:
         if 'child_id' in entry:
-            if island_id is not None and entry['island'] != island_id:
+            if target_islands is not None and entry.get('island') not in target_islands:
                 continue
             entries[entry['child_id']] = entry
 
@@ -324,45 +332,61 @@ def plot_lineage_graph(log_data, title="Evolution Lineage Graph", island_id=None
     plt.grid(True, which="both", ls="--", alpha=0.3)
     plt.show()
 
-def get_best_individuals(log_data):
+def get_best_individuals(log_data, n=1):
     """
-    Extracts the best individual (global) and the best individual per island from the log data.
+    Extracts the best individuals from the log data.
+    Supports returning the top 'n' unique individuals (deduplicated by code).
 
     Args:
         log_data (list): List of evolution log entries.
+        n (int): Number of top individuals to return. Defaults to 1.
 
     Returns:
-        tuple: (global_best_entry, island_bests_dict)
-               global_best_entry: dict of the single best individual found.
+        tuple: (best_result, island_bests_dict)
+               If n=1: best_result is a dict of the single best individual.
+               If n>1: best_result is a list of dicts (Top N best individuals).
                island_bests_dict: dict mapping island_id -> best entry for that island.
     """
     if not log_data:
-        return None, {}
+        return (None if n == 1 else []), {}
 
-    global_best = None
-    island_bests = {}
-
+    # 1. Filter valid entries
+    valid_entries = []
     for entry in log_data:
-        # Check if entry represents a valid individual
-        if 'fitness' not in entry or 'island' not in entry:
-            continue
-            
-        fit = entry['fitness']
-        
-        # Skip failed runs
-        if not isinstance(fit, (int, float)) or fit == float('inf'):
-            continue
-            
-        # Update Global Best
-        if global_best is None or fit < global_best['fitness']:
-            global_best = entry
-            
-        # Update Island Best
+        if 'fitness' in entry and 'island' in entry:
+            fit = entry['fitness']
+            if isinstance(fit, (int, float)) and fit < float('inf'):
+                valid_entries.append(entry)
+
+    # 2. Sort by fitness ascending (best first)
+    valid_entries.sort(key=lambda x: x['fitness'])
+
+    # 3. Deduplicate by Code
+    unique_entries = []
+    seen_codes = set()
+    
+    for entry in valid_entries:
+        code = entry.get('code')
+        if code and code not in seen_codes:
+            unique_entries.append(entry)
+            seen_codes.add(code)
+        elif not code:
+            # maintain entries without code if valid? (Shouldn't happen for valid ind)
+            unique_entries.append(entry)
+
+    # 4. Extract Island Bests (using deduplicated or original? Original is better for island history)
+    # But for island bests, we usually just want the absolute best.
+    island_bests = {}
+    for entry in valid_entries: # Iterate specific island bests from full valid list
         island_id = entry['island']
-        if island_id not in island_bests or fit < island_bests[island_id]['fitness']:
+        if island_id not in island_bests or entry['fitness'] < island_bests[island_id]['fitness']:
             island_bests[island_id] = entry
-            
-    return global_best, island_bests
+
+    # 5. Return Top N
+    if n == 1:
+        return (unique_entries[0] if unique_entries else None), island_bests
+    else:
+        return unique_entries[:n], island_bests
 
 def get_best_child(logs, islands):
     '''

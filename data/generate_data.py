@@ -360,6 +360,53 @@ class PreyPredatorDataset(Dataset):
         self.variables = odeint(self.dynamics, self.initial_state, self.time_points)
         return self.variables
 
+
+class PreyPredatorHibernationDataset(Dataset):
+    """
+    Dataset class for the Prey-Predator Hibernation system.
+    Logic: Predators only wake up when N > H (Holling Type III activation).
+    Variables: N (Prey), P (Predator).
+    """
+    def __init__(self, generation_parameters=None):
+        super().__init__(generation_parameters)
+        self.description = "Measurements of the population of a prey in an environment."
+        self.variables_description = [
+            "x1: Prey Population (N)",
+            "x2: Predator Population (P)"
+        ]
+        
+        # Parameters
+        self.r = self.generation_parameters.get('r', 1.0)
+        self.K = self.generation_parameters.get('K', 2000.0)
+        self.a = self.generation_parameters.get('a', 10.0)
+        self.e = self.generation_parameters.get('e', 0.1)
+        self.d = self.generation_parameters.get('d', 0.8)
+        self.H = self.generation_parameters.get('H', 50.0)
+        
+        self.initial_state = torch.tensor(self.generation_parameters.get('initial_state', [5.0, 15.0]), dtype=torch.float32)
+        self.t_start = self.generation_parameters.get('t_start', 0)
+        self.t_end = self.generation_parameters.get('t_end', 300)
+        self.num_points = self.generation_parameters.get('num_points', 3000)
+
+    def dynamics(self, t, state):
+        N, P = state
+        
+        # Activation (Holling Type III)
+        activation = (N**2) / (self.H**2 + N**2)
+        
+        # dNdt = r*N*(1 - N/K) - (a * activation * P)
+        dNdt = self.r * N * (1 - N / self.K) - (self.a * activation * P)
+        
+        # dPdt = (e * a * activation * P) - (d * P)
+        dPdt = (self.e * self.a * activation * P) - (self.d * P)
+        
+        return torch.stack([dNdt, dPdt])
+
+    def generate(self):
+        self.time_points = torch.linspace(self.t_start, self.t_end, self.num_points, dtype=torch.float32)
+        self.variables = odeint(self.dynamics, self.initial_state, self.time_points)
+        return self.variables
+
 # --- Example Usage (for testing and visualization) ---
 if __name__ == '__main__':
     print("--- Testing Lorenz Dataset Generation ---")
